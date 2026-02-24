@@ -1,0 +1,27 @@
+# Environment variables
+.env
+
+# Virtual environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Large data files
+data/
+data/train/
+data/processed/*.npy
+data/processed/*.pkl
+data/cache
+data/processed/*.csv
+data/
+*.csv
+*.tsv
+*.vec
+*.npy
+*.pkl
+__pycache__/
+.env
+# Jupyter checkpoints
+.ipynb_checkpoints/
