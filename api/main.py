@@ -1,14 +1,16 @@
+import sys
+import os
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(BASE_DIR, "src"))
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from collections import defaultdict
-import sys
-import os
 import numpy as np
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(os.path.join(BASE_DIR, "src"))
-
 from recommender import HybridNewsRecommender
+from live_recommender import LiveRecommender
 
 app = FastAPI(title="NewsIQ API", version="1.0.0")
 
@@ -19,12 +21,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-recommender = HybridNewsRecommender()
+recommender      = HybridNewsRecommender()
+live_recommender = LiveRecommender()
+
 
 @app.on_event("startup")
 def startup():
     recommender.load()
-    print("✅ Recommender loaded")
+    live_recommender.refresh()
+    print("Both recommenders loaded")
 
 
 # ── Helper ────────────────────────────────────────────────────────────────────
@@ -33,13 +38,11 @@ def diversify(recs: list, top_k: int) -> list:
     """
     Round-robin category reranking.
     Guarantees no single category exceeds 35% of top-K results.
-    Works by grouping candidates by category then interleaving them.
     """
     by_category = defaultdict(list)
     for r in recs:
         by_category[r["category"]].append(r)
 
-    # Sort each category bucket by score descending
     for cat in by_category:
         by_category[cat].sort(key=lambda x: x["final_score"], reverse=True)
 
@@ -50,7 +53,6 @@ def diversify(recs: list, top_k: int) -> list:
     cat_pointers = {cat: 0 for cat in categories}
     diverse_recs = []
 
-    # Round-robin: one article per category per round
     while len(diverse_recs) < top_k:
         added = False
         for cat in categories:
@@ -70,7 +72,7 @@ def diversify(recs: list, top_k: int) -> list:
     return diverse_recs[:top_k]
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+# ── MIND / Research Routes ────────────────────────────────────────────────────
 
 @app.get("/")
 def root():
@@ -97,7 +99,7 @@ def get_stats():
 @app.get("/recommend/{user_id}")
 def recommend(
     user_id : str,
-    top_k   : int  = Query(default=10, ge=1, le=100),  # raised to 100
+    top_k   : int  = Query(default=10, ge=1, le=100),
     category: str  = Query(default=""),
     diverse : bool = Query(default=False)
 ):
@@ -107,8 +109,6 @@ def recommend(
             status_code=404, detail=f"User {user_id} not found"
         )
 
-    # Fetch a larger pool when diverse mode is on so
-    # diversify() has candidates from multiple categories to work with
     fetch_k = min(top_k * 10, 100) if diverse else top_k
     recs    = recommender.recommend(user_id, top_k=fetch_k)
 
@@ -118,7 +118,6 @@ def recommend(
     if diverse and not category:
         recs = diversify(recs, top_k)
 
-    # Attach abstracts
     for r in recs:
         art      = recommender.news_df_lookup.get(r["news_id"], {})
         abstract = art.get("abstract", "")
@@ -236,3 +235,47 @@ def get_categories():
         v["category"] for v in recommender.news_df_lookup.values()
     ))
     return {"categories": cats}
+
+
+# ── Live / Demo Routes ────────────────────────────────────────────────────────
+
+@app.post("/live/refresh")
+def live_refresh():
+    """Manually refresh live news — call this before demo."""
+    live_recommender.refresh()
+    return {"status": "refreshed",
+            "article_count": len(live_recommender.articles)}
+
+
+@app.get("/live/recommend")
+def live_recommend(
+    interests: str = Query(...,
+        description="Comma-separated interests e.g. 'cricket,AI,finance'"),
+    top_k    : int = Query(default=10, ge=1, le=20),
+    category : str = Query(default="")
+):
+    interest_list = [i.strip() for i in interests.split(",") if i.strip()]
+    if not interest_list:
+        raise HTTPException(status_code=400,
+                            detail="Provide at least one interest")
+    recs = live_recommender.recommend_for_interests(
+        interest_list, top_k=top_k, category=category
+    )
+    return {"interests": interest_list, "recommendations": recs}
+
+
+@app.get("/live/trending")
+def live_trending(top_k: int = Query(default=10, ge=1, le=20)):
+    recs = live_recommender.trending(top_k=top_k)
+    return {"trending": recs}
+
+
+@app.get("/live/stats")
+def live_stats():
+    last_updated = "never"
+    if live_recommender.articles:
+        last_updated = live_recommender.articles[0].get("fetched_at", "unknown")
+    return {
+        "live_articles": len(live_recommender.articles),
+        "last_updated" : last_updated,
+    }
